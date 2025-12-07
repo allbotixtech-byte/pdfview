@@ -13,17 +13,18 @@
       padding: 0;
       box-sizing: border-box;
       -webkit-tap-highlight-color: transparent;
-      touch-action: manipulation;
+      touch-action: none; /* Disable all browser touch actions */
     }
 
-    body {
+    html, body {
       font-family: Arial, sans-serif;
       background: #000;
       color: white;
       overflow: hidden;
       position: fixed;
-      height: 100vh;
-      width: 100vw;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
     }
 
     #openBtn {
@@ -39,6 +40,7 @@
       border-radius: 12px;
       cursor: pointer;
       z-index: 10;
+      touch-action: manipulation;
     }
 
     #closeBtn {
@@ -55,30 +57,30 @@
       cursor: pointer;
       display: none;
       box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      touch-action: manipulation;
     }
 
-    #pdfViewer {
+    #pdfContainer {
       width: 100vw;
       height: 100vh;
       display: none;
-      background: #333;
-      overflow: auto;
       position: fixed;
       top: 0;
       left: 0;
-      -webkit-overflow-scrolling: touch;
+      overflow: hidden;
+      background: #333;
     }
 
     #pdfCanvas {
       display: block;
       background: white;
-      cursor: grab;
-      touch-action: none;
-      margin: 0 auto;
-    }
-
-    #pdfCanvas:active {
-      cursor: grabbing;
+      position: absolute;
+      top: 0;
+      left: 0;
+      transform-origin: 0 0;
+      will-change: transform;
+      image-rendering: -webkit-optimize-contrast;
+      image-rendering: crisp-edges;
     }
 
     .pageInfo {
@@ -92,6 +94,7 @@
       font-size: 16px;
       z-index: 1000;
       display: none;
+      pointer-events: none;
     }
 
     .loading {
@@ -111,7 +114,7 @@
   <button id="openBtn" onclick="openLocalPDF()">📄 Open Bharat Deck</button>
   <button id="closeBtn" onclick="closePDF()">❌ Close</button>
   
-  <div id="pdfViewer">
+  <div id="pdfContainer">
     <canvas id="pdfCanvas"></canvas>
   </div>
   
@@ -121,22 +124,31 @@
   <script>
     let pdfDoc = null;
     let pageNum = 1;
-    let pageRendering = false;
-    let pageNumPending = null;
-    let scale = 1;
-    let isDragging = false;
-    let startX, startY, scrollLeft, scrollTop;
-    let touchStartDistance = null;
-    let touchStartScale = 1;
-    let maxScale = 5;
-    let minScale = 0.5;
-    let renderTimeout = null;
     let currentPage = null;
+    let scale = 1;
+    let initialScale = 1;
+    
+    // Touch tracking
+    let initialPinchDistance = 0;
+    let initialScaleOnPinch = 1;
     let lastTouchTime = 0;
-    let lastTouchScale = 1;
-
+    let lastTouchX = 0;
+    let lastTouchY = 0;
+    
+    // Drag tracking
+    let isDragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    let offsetX = 0;
+    let offsetY = 0;
+    
+    // Constants
+    const MIN_SCALE = 0.5;
+    const MAX_SCALE = 5;
+    const ZOOM_SPEED = 0.005;
+    
     // DOM elements
-    const pdfViewer = document.getElementById('pdfViewer');
+    const pdfContainer = document.getElementById('pdfContainer');
     const pdfCanvas = document.getElementById('pdfCanvas');
     const ctx = pdfCanvas.getContext('2d');
     const loading = document.getElementById('loading');
@@ -144,13 +156,13 @@
 
     function openLocalPDF() {
       document.getElementById('openBtn').style.display = 'none';
-      pdfViewer.style.display = 'block';
+      pdfContainer.style.display = 'block';
       document.getElementById('closeBtn').style.display = 'block';
       loading.style.display = 'block';
       pageInfo.style.display = 'block';
 
       // Load local PDF file
-      const pdfUrl = 'BHARAT_DECK-v2.pdf'; // Your local PDF file name
+      const pdfUrl = 'BHARAT_DECK-v2.pdf';
       
       // Load PDF using PDF.js
       pdfjsLib.getDocument(pdfUrl).promise.then(function(pdfDoc_) {
@@ -158,8 +170,8 @@
         pageInfo.textContent = `Page: 1 / ${pdfDoc.numPages}`;
         loading.style.display = 'none';
         
-        // Initial render with full screen
-        renderPage(pageNum);
+        // Load and render first page
+        loadPage(pageNum);
       }).catch(function(error) {
         console.error('Error loading PDF:', error);
         loading.textContent = 'Error loading PDF. Please make sure BHARAT_DECK-v2.pdf is in the same folder.';
@@ -169,244 +181,262 @@
       });
     }
 
-    function calculateOptimalScale(page) {
-      const viewport = page.getViewport({ scale: 1 });
-      const containerWidth = window.innerWidth;
-      const containerHeight = window.innerHeight;
+    function loadPage(num) {
+      if (!pdfDoc) return;
       
-      // Calculate scale to fit width or height
-      const scaleX = containerWidth / viewport.width;
-      const scaleY = containerHeight / viewport.height;
-      
-      // Use the smaller scale to fit entire page on screen
-      return Math.min(scaleX, scaleY) * 0.95; // 95% to add a small margin
+      pdfDoc.getPage(num).then(function(page) {
+        currentPage = page;
+        
+        // Calculate initial scale to fit screen
+        const viewport = page.getViewport({ scale: 1 });
+        const containerWidth = window.innerWidth;
+        const containerHeight = window.innerHeight;
+        
+        const scaleX = containerWidth / viewport.width;
+        const scaleY = containerHeight / viewport.height;
+        initialScale = Math.min(scaleX, scaleY) * 0.9;
+        scale = initialScale;
+        
+        // Center the PDF on screen
+        offsetX = (containerWidth - (viewport.width * scale)) / 2;
+        offsetY = (containerHeight - (viewport.height * scale)) / 2;
+        
+        // Render the page
+        renderPage();
+      });
     }
 
-    function renderPage(num, immediate = false) {
-      if (renderTimeout && !immediate) {
-        clearTimeout(renderTimeout);
-      }
+    function renderPage() {
+      if (!currentPage) return;
       
-      const renderFunction = function() {
-        pageRendering = true;
-        
-        pdfDoc.getPage(num).then(function(page) {
-          currentPage = page;
-          
-          // Calculate optimal scale for full screen on first load
-          if (scale === 1) {
-            scale = calculateOptimalScale(page);
-          }
-          
-          const viewport = page.getViewport({ scale: scale });
-          
-          // Set canvas dimensions to match the viewport
-          pdfCanvas.width = viewport.width;
-          pdfCanvas.height = viewport.height;
-          
-          // Clear canvas
-          ctx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
-          ctx.fillStyle = 'white';
-          ctx.fillRect(0, 0, pdfCanvas.width, pdfCanvas.height);
-          
-          // Reset canvas transform to prevent rotation
-          ctx.setTransform(1, 0, 0, 1, 0, 0);
-          
-          // Render PDF page
-          const renderContext = {
-            canvasContext: ctx,
-            viewport: viewport
-          };
-          
-          return page.render(renderContext).promise;
-        }).then(function() {
-          pageRendering = false;
-          if (pageNumPending !== null) {
-            renderPage(pageNumPending, true);
-            pageNumPending = null;
-          }
-        });
-        
-        pageInfo.textContent = `Page: ${num} / ${pdfDoc.numPages}`;
+      const viewport = currentPage.getViewport({ scale: scale });
+      
+      // Set canvas dimensions
+      pdfCanvas.width = viewport.width;
+      pdfCanvas.height = viewport.height;
+      
+      // Clear canvas
+      ctx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+      
+      // Reset any transformations
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      
+      // Apply position transformation
+      pdfCanvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+      
+      // Render PDF page
+      const renderContext = {
+        canvasContext: ctx,
+        viewport: viewport
       };
       
-      if (immediate) {
-        renderFunction();
-      } else {
-        renderTimeout = setTimeout(renderFunction, 16);
-      }
+      currentPage.render(renderContext);
     }
 
-    function queueRenderPage(num) {
-      if (pageRendering) {
-        pageNumPending = num;
-      } else {
-        renderPage(num, true);
-      }
-    }
-
-    // Simple pinch zoom with scale clamping
-    let initialTouches = [];
+    // ========== TOUCH HANDLERS ==========
     
-    pdfCanvas.addEventListener('touchstart', function(e) {
+    function getDistance(touch1, touch2) {
+      const dx = touch2.clientX - touch1.clientX;
+      const dy = touch2.clientY - touch1.clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function getCenter(touch1, touch2) {
+      return {
+        x: (touch1.clientX + touch2.clientX) / 2,
+        y: (touch1.clientY + touch2.clientY) / 2
+      };
+    }
+
+    // Single finger touch - drag
+    pdfContainer.addEventListener('touchstart', function(e) {
       e.preventDefault();
       
-      if (e.touches.length === 2) {
-        // Store initial touch positions
-        initialTouches = [
-          { x: e.touches[0].clientX, y: e.touches[0].clientY },
-          { x: e.touches[1].clientX, y: e.touches[1].clientY }
-        ];
-        touchStartScale = scale;
-        lastTouchScale = scale;
-      } else if (e.touches.length === 1) {
-        // Drag start
+      if (e.touches.length === 1) {
         isDragging = true;
-        startX = e.touches[0].clientX;
-        startY = e.touches[0].clientY;
-        scrollLeft = pdfViewer.scrollLeft;
-        scrollTop = pdfViewer.scrollTop;
-        pdfCanvas.style.cursor = 'grabbing';
+        lastX = e.touches[0].clientX;
+        lastY = e.touches[0].clientY;
+        
+        // Store for double tap detection
+        const currentTime = Date.now();
+        if (currentTime - lastTouchTime < 300) {
+          // Double tap - reset to fit screen
+          scale = initialScale;
+          offsetX = (window.innerWidth - (pdfCanvas.width * scale)) / 2;
+          offsetY = (window.innerHeight - (pdfCanvas.height * scale)) / 2;
+          renderPage();
+        }
+        lastTouchTime = currentTime;
+        lastTouchX = e.touches[0].clientX;
+        lastTouchY = e.touches[0].clientY;
+        
+      } else if (e.touches.length === 2) {
+        // Two finger touch - pinch zoom
+        isDragging = false;
+        initialPinchDistance = getDistance(e.touches[0], e.touches[1]);
+        initialScaleOnPinch = scale;
       }
     }, { passive: false });
 
-    pdfCanvas.addEventListener('touchmove', function(e) {
+    pdfContainer.addEventListener('touchmove', function(e) {
       e.preventDefault();
       
-      if (e.touches.length === 2 && initialTouches.length === 2) {
-        // Calculate current distance
-        const currentTouches = [
-          { x: e.touches[0].clientX, y: e.touches[0].clientY },
-          { x: e.touches[1].clientX, y: e.touches[1].clientY }
-        ];
-        
-        // Calculate initial and current distances
-        const initialDistance = Math.sqrt(
-          Math.pow(initialTouches[1].x - initialTouches[0].x, 2) +
-          Math.pow(initialTouches[1].y - initialTouches[0].y, 2)
-        );
-        
-        const currentDistance = Math.sqrt(
-          Math.pow(currentTouches[1].x - currentTouches[0].x, 2) +
-          Math.pow(currentTouches[1].y - currentTouches[0].y, 2)
-        );
-        
-        // Avoid division by zero and handle small distances
-        if (initialDistance > 10) {
-          const scaleChange = currentDistance / initialDistance;
-          const newScale = Math.max(minScale, Math.min(maxScale, touchStartScale * scaleChange));
-          
-          // Only update if scale actually changed
-          if (Math.abs(newScale - scale) > 0.01) {
-            scale = newScale;
-            
-            // Debounce rendering
-            if (renderTimeout) clearTimeout(renderTimeout);
-            renderTimeout = setTimeout(() => {
-              renderPage(pageNum, true);
-            }, 16); // Render at ~60fps
-          }
-        }
-      } else if (isDragging && e.touches.length === 1) {
+      if (e.touches.length === 1 && isDragging) {
         // Drag
-        const x = e.touches[0].clientX;
-        const y = e.touches[0].clientY;
-        const walkX = (x - startX) * 2;
-        const walkY = (y - startY) * 2;
-        pdfViewer.scrollLeft = scrollLeft - walkX;
-        pdfViewer.scrollTop = scrollTop - walkY;
+        const currentX = e.touches[0].clientX;
+        const currentY = e.touches[0].clientY;
+        
+        offsetX += currentX - lastX;
+        offsetY += currentY - lastY;
+        
+        lastX = currentX;
+        lastY = currentY;
+        
+        // Update position without re-rendering PDF (just move canvas)
+        pdfCanvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+        
+      } else if (e.touches.length === 2) {
+        // Pinch zoom
+        isDragging = false;
+        const currentDistance = getDistance(e.touches[0], e.touches[1]);
+        
+        if (initialPinchDistance > 0) {
+          const scaleChange = currentDistance / initialPinchDistance;
+          let newScale = initialScaleOnPinch * scaleChange;
+          
+          // Clamp scale
+          newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+          
+          // Calculate center point for zoom
+          const center = getCenter(e.touches[0], e.touches[1]);
+          const containerRect = pdfContainer.getBoundingClientRect();
+          const centerX = center.x - containerRect.left;
+          const centerY = center.y - containerRect.top;
+          
+          // Adjust offset to zoom around center point
+          const scaleRatio = newScale / scale;
+          offsetX = centerX - (centerX - offsetX) * scaleRatio;
+          offsetY = centerY - (centerY - offsetY) * scaleRatio;
+          
+          scale = newScale;
+          
+          // Update transform without re-rendering PDF
+          pdfCanvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+        }
       }
     }, { passive: false });
 
-    pdfCanvas.addEventListener('touchend', function(e) {
+    pdfContainer.addEventListener('touchend', function(e) {
       e.preventDefault();
       isDragging = false;
-      initialTouches = [];
-      pdfCanvas.style.cursor = 'grab';
       
-      // Final render after touch ends
-      if (renderTimeout) clearTimeout(renderTimeout);
-      renderPage(pageNum, true);
-    }, { passive: false });
-
-    // Prevent default browser touch behaviors
-    document.addEventListener('touchmove', function(e) {
-      if (pdfViewer.style.display === 'block' && e.touches.length === 2) {
-        e.preventDefault();
-      }
-    }, { passive: false });
-
-    // Mouse wheel zoom for desktop testing
-    pdfCanvas.addEventListener('wheel', function(e) {
-      e.preventDefault();
-      if (e.ctrlKey) {
-        const delta = e.deltaY > 0 ? 0.9 : 1.1;
-        scale = Math.max(minScale, Math.min(maxScale, scale * delta));
-        renderPage(pageNum, true);
-      } else {
-        pdfViewer.scrollTop += e.deltaY;
-        pdfViewer.scrollLeft += e.deltaX;
-      }
-    });
-
-    // Double tap to fit screen
-    let lastTap = 0;
-    pdfCanvas.addEventListener('touchend', function(e) {
-      const currentTime = new Date().getTime();
-      const tapLength = currentTime - lastTap;
-      
-      if (tapLength < 300 && tapLength > 0) {
-        // Double tap detected - fit to screen
-        if (currentPage) {
-          scale = calculateOptimalScale(currentPage);
+      // Check for swipe navigation
+      if (e.changedTouches.length === 1) {
+        const touch = e.changedTouches[0];
+        const diffX = touch.clientX - lastTouchX;
+        
+        if (Math.abs(diffX) > 100) { // Minimum swipe distance
+          if (diffX > 0 && pageNum > 1) {
+            // Swipe right - previous page
+            pageNum--;
+            loadPage(pageNum);
+          } else if (diffX < 0 && pageNum < pdfDoc.numPages) {
+            // Swipe left - next page
+            pageNum++;
+            loadPage(pageNum);
+          }
         }
-        renderPage(pageNum, true);
-        e.preventDefault();
       }
-      lastTap = currentTime;
-    });
+      
+      // After gesture ends, ensure canvas stays within bounds
+      constrainCanvasPosition();
+    }, { passive: false });
 
-    // Swipe for page navigation
-    let touchStartX = 0;
-    let touchStartY = 0;
+    // ========== MOUSE HANDLERS (for desktop testing) ==========
     
-    pdfViewer.addEventListener('touchstart', function(e) {
-      if (e.touches.length === 1) {
-        touchStartX = e.touches[0].clientX;
-        touchStartY = e.touches[0].clientY;
+    pdfContainer.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      isDragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      pdfContainer.style.cursor = 'grabbing';
+    });
+
+    pdfContainer.addEventListener('mousemove', function(e) {
+      e.preventDefault();
+      if (isDragging) {
+        const currentX = e.clientX;
+        const currentY = e.clientY;
+        
+        offsetX += currentX - lastX;
+        offsetY += currentY - lastY;
+        
+        lastX = currentX;
+        lastY = currentY;
+        
+        pdfCanvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
       }
     });
 
-    pdfViewer.addEventListener('touchend', function(e) {
-      if (!touchStartX || e.touches.length > 0) return;
+    pdfContainer.addEventListener('mouseup', function() {
+      isDragging = false;
+      pdfContainer.style.cursor = 'default';
+      constrainCanvasPosition();
+    });
+
+    pdfContainer.addEventListener('mouseleave', function() {
+      isDragging = false;
+      pdfContainer.style.cursor = 'default';
+    });
+
+    // Wheel zoom for desktop
+    pdfContainer.addEventListener('wheel', function(e) {
+      e.preventDefault();
       
-      const touchEndX = e.changedTouches[0].clientX;
-      const touchEndY = e.changedTouches[0].clientY;
-      const diffX = touchStartX - touchEndX;
-      const diffY = touchStartY - touchEndY;
+      const rect = pdfContainer.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
       
-      // Check if it's mostly horizontal swipe
-      if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > 100) {
-        if (diffX > 0 && pageNum < pdfDoc.numPages) {
-          pageNum++;
-          if (currentPage) {
-            scale = calculateOptimalScale(currentPage);
-          }
-        } else if (diffX < 0 && pageNum > 1) {
-          pageNum--;
-          if (currentPage) {
-            scale = calculateOptimalScale(currentPage);
-          }
-        }
-        queueRenderPage(pageNum);
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * delta));
+      
+      // Zoom towards mouse position
+      const scaleRatio = newScale / scale;
+      offsetX = mouseX - (mouseX - offsetX) * scaleRatio;
+      offsetY = mouseY - (mouseY - offsetY) * scaleRatio;
+      
+      scale = newScale;
+      pdfCanvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    }, { passive: false });
+
+    // ========== HELPER FUNCTIONS ==========
+    
+    function constrainCanvasPosition() {
+      const containerWidth = window.innerWidth;
+      const containerHeight = window.innerHeight;
+      const canvasWidth = pdfCanvas.width * scale;
+      const canvasHeight = pdfCanvas.height * scale;
+      
+      // Don't allow dragging beyond edges
+      if (canvasWidth < containerWidth) {
+        offsetX = (containerWidth - canvasWidth) / 2;
+      } else {
+        offsetX = Math.min(0, Math.max(containerWidth - canvasWidth, offsetX));
       }
       
-      touchStartX = 0;
-      touchStartY = 0;
-    });
+      if (canvasHeight < containerHeight) {
+        offsetY = (containerHeight - canvasHeight) / 2;
+      } else {
+        offsetY = Math.min(0, Math.max(containerHeight - canvasHeight, offsetY));
+      }
+      
+      pdfCanvas.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    }
 
     function closePDF() {
-      pdfViewer.style.display = 'none';
+      pdfContainer.style.display = 'none';
       document.getElementById('closeBtn').style.display = 'none';
       document.getElementById('openBtn').style.display = 'block';
       loading.style.display = 'none';
@@ -415,31 +445,23 @@
       // Reset state
       pdfDoc = null;
       pageNum = 1;
-      scale = 1;
       currentPage = null;
-      initialTouches = [];
-      
-      if (renderTimeout) {
-        clearTimeout(renderTimeout);
-        renderTimeout = null;
-      }
+      scale = 1;
+      offsetX = 0;
+      offsetY = 0;
     }
 
-    // Handle orientation change
-    window.addEventListener('orientationchange', function() {
-      setTimeout(() => {
-        if (pdfDoc && currentPage) {
-          scale = calculateOptimalScale(currentPage);
-          renderPage(pageNum, true);
-        }
-      }, 300);
+    // Handle window resize
+    window.addEventListener('resize', function() {
+      if (currentPage) {
+        constrainCanvasPosition();
+      }
     });
 
-    // Auto-fit on window resize
-    window.addEventListener('resize', function() {
-      if (pdfDoc && currentPage) {
-        scale = calculateOptimalScale(currentPage);
-        renderPage(pageNum, true);
+    // Prevent context menu
+    document.addEventListener('contextmenu', function(e) {
+      if (pdfContainer.style.display === 'block') {
+        e.preventDefault();
       }
     });
   </script>
