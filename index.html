@@ -50,7 +50,6 @@
 <body>
 
   <button id="openBtn" onclick="openPDF()">📄 Open Bharat Deck</button>
-
   <button id="closeBtn" onclick="closePDF()">❌ Close</button>
 
   <iframe id="viewer"></iframe>
@@ -61,6 +60,7 @@
       document.getElementById("viewer").style.display = "block";
       document.getElementById("closeBtn").style.display = "block";
 
+      // ✅ RAW GITHUB URL (THIS IS THE FIX)
       const pdfURL = "https://raw.githubusercontent.com/allbotixtech-byte/pdfview/main/BHARAT_DECK-v2.pdf";
 
       document.getElementById("viewer").src =
@@ -77,4 +77,3 @@
 
 </body>
 </html>
-
