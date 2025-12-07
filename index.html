@@ -2,19 +2,35 @@
 <html>
 <head>
   <title>Temi PDF Viewer</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes">
+  
+  <!-- PDF.js Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  
   <style>
-    body {
+    * {
       margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+
+    body {
       font-family: Arial, sans-serif;
       background: #000;
       color: white;
-      text-align: center;
+      overflow: hidden;
+      position: relative;
+      height: 100vh;
+      width: 100vw;
     }
 
     #openBtn {
-      margin-top: 120px;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
       padding: 25px 60px;
       font-size: 26px;
       background: #00c853;
@@ -22,6 +38,7 @@
       border: none;
       border-radius: 12px;
       cursor: pointer;
+      z-index: 10;
     }
 
     #closeBtn {
@@ -30,49 +47,290 @@
       right: 30px;
       padding: 14px 28px;
       font-size: 20px;
-      background: red;
+      background: rgba(255, 0, 0, 0.9);
       color: white;
       border: none;
       border-radius: 10px;
-      display: none;
-      z-index: 9999;
+      z-index: 1001;
       cursor: pointer;
+      display: none;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
 
-    #viewer {
+    #pdfViewer {
       width: 100vw;
       height: 100vh;
-      border: none;
       display: none;
+      background: #333;
+      overflow: auto;
+      position: relative;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    #pdfCanvas {
+      display: block;
+      margin: 0 auto;
+      background: white;
+      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+      cursor: grab;
+      touch-action: pan-x pan-y pinch-zoom;
+    }
+
+    #pdfCanvas:active {
+      cursor: grabbing;
+    }
+
+    .pageInfo {
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.7);
+      padding: 10px 20px;
+      border-radius: 20px;
+      font-size: 16px;
+      z-index: 1000;
+      display: none;
+    }
+
+    .loading {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-size: 20px;
+      display: none;
+      z-index: 1002;
     }
   </style>
 </head>
 <body>
 
-  <button id="openBtn" onclick="openPDF()">📄 Open Bharat Deck</button>
+  <button id="openBtn" onclick="openLocalPDF()">📄 Open Bharat Deck</button>
   <button id="closeBtn" onclick="closePDF()">❌ Close</button>
-
-  <iframe id="viewer"></iframe>
+  
+  <div id="pdfViewer">
+    <canvas id="pdfCanvas"></canvas>
+  </div>
+  
+  <div class="loading" id="loading">Loading PDF...</div>
+  <div class="pageInfo" id="pageInfo">Page: 1 / 1</div>
 
   <script>
-    function openPDF() {
-      document.getElementById("openBtn").style.display = "none";
-      document.getElementById("viewer").style.display = "block";
-      document.getElementById("closeBtn").style.display = "block";
+    let pdfDoc = null;
+    let pageNum = 1;
+    let pageRendering = false;
+    let pageNumPending = null;
+    let scale = 1;
+    let isDragging = false;
+    let startX, startY, scrollLeft, scrollTop;
+    let touchStartDistance = null;
+    let touchStartScale = 1;
+    let maxScale = 5;
+    let minScale = 0.5;
 
-      // ✅ RAW GITHUB URL (THIS IS THE FIX)
-      const pdfURL = "https://raw.githubusercontent.com/allbotixtech-byte/pdfview/main/BHARAT_DECK-v2.pdf";
+    // DOM elements
+    const pdfViewer = document.getElementById('pdfViewer');
+    const pdfCanvas = document.getElementById('pdfCanvas');
+    const ctx = pdfCanvas.getContext('2d');
+    const loading = document.getElementById('loading');
+    const pageInfo = document.getElementById('pageInfo');
 
-      document.getElementById("viewer").src =
-        "https://mozilla.github.io/pdf.js/web/viewer.html?file=" + encodeURIComponent(pdfURL);
+    function openLocalPDF() {
+      document.getElementById('openBtn').style.display = 'none';
+      pdfViewer.style.display = 'block';
+      document.getElementById('closeBtn').style.display = 'block';
+      loading.style.display = 'block';
+      pageInfo.style.display = 'block';
+
+      // Load local PDF file
+      const pdfUrl = 'BHARAT_DECK-v2.pdf'; // Your local PDF file name
+      
+      // Load PDF using PDF.js
+      pdfjsLib.getDocument(pdfUrl).promise.then(function(pdfDoc_) {
+        pdfDoc = pdfDoc_;
+        pageInfo.textContent = `Page: 1 / ${pdfDoc.numPages}`;
+        loading.style.display = 'none';
+        
+        // Initial render
+        renderPage(pageNum);
+      }).catch(function(error) {
+        console.error('Error loading PDF:', error);
+        loading.textContent = 'Error loading PDF. Please make sure BHARAT_DECK-v2.pdf is in the same folder.';
+        setTimeout(() => {
+          closePDF();
+        }, 3000);
+      });
     }
+
+    function renderPage(num) {
+      pageRendering = true;
+      
+      pdfDoc.getPage(num).then(function(page) {
+        const viewport = page.getViewport({ scale: scale });
+        
+        // Set canvas dimensions
+        pdfCanvas.height = viewport.height;
+        pdfCanvas.width = viewport.width;
+        
+        // Adjust container for better touch scrolling
+        pdfViewer.style.overflow = 'auto';
+        
+        // Render PDF page
+        const renderContext = {
+          canvasContext: ctx,
+          viewport: viewport
+        };
+        
+        const renderTask = page.render(renderContext);
+        
+        renderTask.promise.then(function() {
+          pageRendering = false;
+          if (pageNumPending !== null) {
+            renderPage(pageNumPending);
+            pageNumPending = null;
+          }
+        });
+      });
+      
+      pageInfo.textContent = `Page: ${num} / ${pdfDoc.numPages}`;
+    }
+
+    function queueRenderPage(num) {
+      if (pageRendering) {
+        pageNumPending = num;
+      } else {
+        renderPage(num);
+      }
+    }
+
+    // Touch pinch zoom handlers
+    pdfCanvas.addEventListener('touchstart', function(e) {
+      if (e.touches.length === 2) {
+        // Pinch start
+        const touch1 = e.touches[0];
+        const touch2 = e.touches[1];
+        touchStartDistance = Math.hypot(
+          touch2.clientX - touch1.clientX,
+          touch2.clientY - touch1.clientY
+        );
+        touchStartScale = scale;
+        e.preventDefault();
+      } else if (e.touches.length === 1) {
+        // Drag start
+        isDragging = true;
+        startX = e.touches[0].pageX - pdfViewer.offsetLeft;
+        startY = e.touches[0].pageY - pdfViewer.offsetTop;
+        scrollLeft = pdfViewer.scrollLeft;
+        scrollTop = pdfViewer.scrollTop;
+        pdfCanvas.style.cursor = 'grabbing';
+      }
+    });
+
+    pdfCanvas.addEventListener('touchmove', function(e) {
+      if (e.touches.length === 2 && touchStartDistance !== null) {
+        // Pinch zoom
+        const touch1 = e.touches[0];
+        const touch2 = e.touches[1];
+        const currentDistance = Math.hypot(
+          touch2.clientX - touch1.clientX,
+          touch2.clientY - touch1.clientY
+        );
+        
+        const newScale = touchStartScale * (currentDistance / touchStartDistance);
+        scale = Math.max(minScale, Math.min(maxScale, newScale));
+        
+        renderPage(pageNum);
+        e.preventDefault();
+      } else if (isDragging && e.touches.length === 1) {
+        // Drag
+        e.preventDefault();
+        const x = e.touches[0].pageX - pdfViewer.offsetLeft;
+        const y = e.touches[0].pageY - pdfViewer.offsetTop;
+        const walkX = (x - startX) * 2;
+        const walkY = (y - startY) * 2;
+        pdfViewer.scrollLeft = scrollLeft - walkX;
+        pdfViewer.scrollTop = scrollTop - walkY;
+      }
+    });
+
+    pdfCanvas.addEventListener('touchend', function() {
+      isDragging = false;
+      touchStartDistance = null;
+      pdfCanvas.style.cursor = 'grab';
+    });
+
+    // Mouse wheel zoom for desktop testing
+    pdfCanvas.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      if (e.ctrlKey) {
+        // Zoom with Ctrl + Wheel
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        scale = Math.max(minScale, Math.min(maxScale, scale * delta));
+        renderPage(pageNum);
+      } else {
+        // Scroll vertically
+        pdfViewer.scrollTop += e.deltaY;
+      }
+    });
+
+    // Double tap to reset zoom
+    pdfCanvas.addEventListener('dblclick', function() {
+      scale = 1;
+      renderPage(pageNum);
+    });
+
+    // Swipe for page navigation
+    let touchStartX = 0;
+    pdfViewer.addEventListener('touchstart', function(e) {
+      if (e.touches.length === 1) {
+        touchStartX = e.touches[0].clientX;
+      }
+    });
+
+    pdfViewer.addEventListener('touchend', function(e) {
+      if (!touchStartX) return;
+      
+      const touchEndX = e.changedTouches[0].clientX;
+      const diff = touchStartX - touchEndX;
+      
+      // Minimum swipe distance for page change
+      if (Math.abs(diff) > 100) {
+        if (diff > 0 && pageNum < pdfDoc.numPages) {
+          // Swipe left - next page
+          pageNum++;
+        } else if (diff < 0 && pageNum > 1) {
+          // Swipe right - previous page
+          pageNum--;
+        }
+        queueRenderPage(pageNum);
+      }
+      
+      touchStartX = 0;
+    });
 
     function closePDF() {
-      document.getElementById("viewer").src = "";
-      document.getElementById("viewer").style.display = "none";
-      document.getElementById("closeBtn").style.display = "none";
-      document.getElementById("openBtn").style.display = "block";
+      pdfViewer.style.display = 'none';
+      document.getElementById('closeBtn').style.display = 'none';
+      document.getElementById('openBtn').style.display = 'block';
+      loading.style.display = 'none';
+      pageInfo.style.display = 'none';
+      
+      // Reset state
+      pdfDoc = null;
+      pageNum = 1;
+      scale = 1;
     }
+
+    // Handle orientation change
+    window.addEventListener('orientationchange', function() {
+      setTimeout(() => {
+        if (pdfDoc) {
+          renderPage(pageNum);
+        }
+      }, 300);
+    });
   </script>
 
 </body>
